@@ -1,114 +1,79 @@
 import LLM "mo:llm";
-import Principal "mo:base/Principal";
-import HashMap "mo:base/HashMap";
-import Buffer "mo:base/Buffer";
 import Array "mo:base/Array";
-import Option "mo:base/Option";
-import Error "mo:base/Error";
+import Principal "mo:base/Principal";
+import Trie "mo:base/Trie";
 
-actor class ChatBot() = this {
-  // Stable storage for chat history
-  private stable var userChatsEntries : [(Principal, [LLM.ChatMessage])] = [];
-  private var userChats = HashMap.HashMap<Principal, Buffer<LLM.ChatMessage>>(
-    10,
-    Principal.equal,
-    Principal.hash
-  );
+persistent actor {
+  stable var histories : Trie.Trie<Principal, [LLM.ChatMessage]> = Trie.empty();
 
-  // Constants
-  private let MAX_HISTORY_SIZE = 100;
-  private let INITIAL_MESSAGE = {
-    system = {
-      content = "I'm a sovereign AI agent living on the Internet Computer. Ask me anything."
-    }
+  let anonymousPrincipal = Principal.fromText("2vxsx-fae");
+
+  let initialSystemMessage : LLM.ChatMessage = #system({
+    content = "I'm a sovereign AI agent living on the Internet Computer. Ask me anything."
+  });
+
+  func shouldPersist(p : Principal) : Bool {
+    not Principal.equal(p, anonymousPrincipal);
   };
 
-  system func preupgrade() {
-    // Store chat histories before upgrade
-    userChatsEntries := Array.map<(Principal, Buffer<LLM.ChatMessage>), (Principal, [LLM.ChatMessage])>(
-      HashMap.toArray(userChats),
-      func(entry : (Principal, Buffer<LLM.ChatMessage>)) : (Principal, [LLM.ChatMessage]) {
-        (entry.0, Buffer.toArray(entry.1))
-      }
-    );
+  func key(p : Principal) : Trie.Key<Principal> {
+    { key = p; hash = Principal.hash(p) };
   };
 
-  system func postupgrade() {
-    // Restore chat histories after upgrade
-    for ((principal, messages) in userChatsEntries.vals()) {
-      let buffer = Buffer.Buffer<LLM.ChatMessage>(MAX_HISTORY_SIZE);
-      for (msg in messages.vals()) {
-        buffer.add(msg);
+  func getHistory(p : Principal) : [LLM.ChatMessage] {
+    if (shouldPersist(p)) {
+      switch (Trie.find(histories, key(p), Principal.equal)) {
+        case (?history) history;
+        case null [initialSystemMessage];
       };
-      userChats.put(principal, buffer);
-    };
-    userChatsEntries := [];
-  };
-
-  // Helper to get or initialize user chat history
-  private func getUserChat(user: Principal) : Buffer<LLM.ChatMessage> {
-    switch (userChats.get(user)) {
-      case (?chat) chat;
-      case null {
-        let newChat = Buffer.Buffer<LLM.ChatMessage>(MAX_HISTORY_SIZE);
-        newChat.add(INITIAL_MESSAGE);
-        userChats.put(user, newChat);
-        newChat
-      };
+    } else {
+      [initialSystemMessage];
     };
   };
 
-  public shared(msg) func prompt(prompt : Text) : async Text {
+  public func prompt(prompt : Text) : async Text {
     await LLM.prompt(#Llama3_1_8B, prompt);
   };
 
-  public shared(msg) func chat(messages : [LLM.ChatMessage]) : async Text {
-    if (Principal.isAnonymous(msg.caller)) {
-      throw Error.reject("Authentication required");
-    };
+  public query shared ({ caller }) func getChatHistory() : async [LLM.ChatMessage] {
+    getHistory(caller);
+  };
 
-    let userChat = getUserChat(msg.caller);
-    
-    // Add new messages to history
-    for (message in messages.vals()) {
-      if (userChat.size() >= MAX_HISTORY_SIZE) {
-        userChat.removeLast();
+  public shared ({ caller }) func chat(messages : [LLM.ChatMessage]) : async [LLM.ChatMessage] {
+    let baseHistory = getHistory(caller);
+    let normalizedHistory =
+      if (Array.size(messages) == 0) {
+        baseHistory;
+      } else {
+        Array.append([initialSystemMessage], messages);
       };
-      userChat.add(message);
-    };
 
-    let response = await LLM.chat(#Llama3_1_8B).withMessages(messages).send();
-    
-    switch (response.message.content) {
-      case (?text) {
-        // Add response to history
-        if (userChat.size() >= MAX_HISTORY_SIZE) {
-          userChat.removeLast();
-        };
-        userChat.add({ system = { content = text } });
-        text
-      };
+    let response = await LLM.chat(#Llama3_1_8B)
+      .withMessages(normalizedHistory)
+      .send();
+
+    let replyText = switch (response.message.content) {
+      case (?text) text;
       case null "";
     };
+
+    let assistantMessage : LLM.ChatMessage = #assistant({ content = replyText });
+
+    let updatedHistory = Array.append(normalizedHistory, [assistantMessage]);
+
+    if (shouldPersist(caller)) {
+      histories := Trie.put(histories, key(caller), Principal.equal, updatedHistory).0;
+    };
+
+    updatedHistory;
   };
 
-  public shared query(msg) func getChatHistory() : async ?[LLM.ChatMessage] {
-    if (Principal.isAnonymous(msg.caller)) {
-      return null;
-    };
-    
-    switch (userChats.get(msg.caller)) {
-      case (?chat) ?Buffer.toArray(chat);
-      case null null;
-    };
-  };
-
-  public shared(msg) func clearHistory() : async Bool {
-    if (Principal.isAnonymous(msg.caller)) {
+  public shared ({ caller }) func clearHistory() : async Bool {
+    if (!shouldPersist(caller)) {
       return false;
     };
-    
-    userChats.delete(msg.caller);
+
+    histories := Trie.remove(histories, key(caller), Principal.equal).0;
     true;
   };
 };
