@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { backend } from 'declarations/backend';
+import { authService } from './services/auth';
 import botImg from '/bot.svg';
 import userImg from '/user.svg';
 import '/index.css';
@@ -13,6 +14,8 @@ const App = () => {
   ]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
   const chatBoxRef = useRef(null);
 
   const formatDate = (date) => {
@@ -66,14 +69,70 @@ const App = () => {
   };
 
   useEffect(() => {
+    const init = async () => {
+      const isAuth = await authService.initialize();
+      setIsAuthenticated(isAuth);
+      if (isAuth) {
+        const history = await backend.getChatHistory();
+        if (history) {
+          setChat(history);
+        }
+      }
+      setIsInitializing(false);
+    };
+    init();
+  }, []);
+
+  useEffect(() => {
     if (chatBoxRef.current) {
       chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
     }
   }, [chat]);
 
+  const handleLogin = async () => {
+    await authService.login();
+    setIsAuthenticated(true);
+    const history = await backend.getChatHistory();
+    if (history) {
+      setChat(history);
+    }
+  };
+
+  const handleLogout = async () => {
+    await authService.logout();
+    setIsAuthenticated(false);
+    setChat([{
+      system: { content: "I'm a sovereign AI agent living on the Internet Computer. Ask me anything." }
+    }]);
+  };
+
+  if (isInitializing) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gray-50">
+        <div className="text-xl">Loading...</div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50 p-4">
       <div className="flex h-[80vh] w-full max-w-2xl flex-col rounded-lg bg-white shadow-lg">
+        <div className="flex justify-end p-4 bg-gray-100 border-b">
+          {!isAuthenticated ? (
+            <button
+              onClick={handleLogin}
+              className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+            >
+              Login with Internet Identity
+            </button>
+          ) : (
+            <button
+              onClick={handleLogout}
+              className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+            >
+              Logout
+            </button>
+          )}
         <div className="flex-1 overflow-y-auto rounded-t-lg bg-gray-100 p-4" ref={chatBoxRef}>
           {chat.map((message, index) => {
             const isUser = 'user' in message;
