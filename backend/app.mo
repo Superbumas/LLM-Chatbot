@@ -32,7 +32,7 @@ persistent actor {
   };
 
   public func prompt(prompt : Text) : async Text {
-    await LLM.prompt(#Llama3_1_8B, prompt);
+    await LLM.prompt(#Llama3_1_8B, prompt)
   };
 
   public query shared ({ caller }) func getChatHistory() : async [LLM.ChatMessage] {
